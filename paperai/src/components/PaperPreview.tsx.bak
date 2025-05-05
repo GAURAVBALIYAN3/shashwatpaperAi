@@ -1,0 +1,648 @@
+'use client';
+
+import { useRef, useState, useEffect } from 'react';
+import { jsPDF } from 'jspdf';
+import Image from 'next/image';
+import dynamic from 'next/dynamic';
+
+// Import the rich text editor dynamically to avoid SSR issues
+const ReactQuill = dynamic(() => import('react-quill'), { ssr: false });
+import 'react-quill/dist/quill.snow.css';
+
+type TextFormatType = {
+  isBold: boolean;
+  isItalic: boolean;
+  fontSize: number;
+  alignment: 'left' | 'center' | 'right';
+};
+
+type TextBlockType = {
+  text: string;
+  format: TextFormatType;
+};
+
+type PaperPreviewProps = {
+  examPaper: {
+    schoolName: string;
+    className: string;
+    subject: string;
+    examTime: string;
+    totalMarks: string;
+    extractedText: string[];
+    language: string;
+    examTerm?: string;
+    hasStudentFields?: boolean;
+  };
+  textFormat: TextFormatType;
+  onBack: () => void;
+};
+
+export default function PaperPreview({ examPaper, textFormat, onBack }: PaperPreviewProps) {
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [editedPaper, setEditedPaper] = useState({...examPaper});
+  
+  // Rich text content for each question
+  const [richTextContent, setRichTextContent] = useState<Record<number, string>>({});
+  
+  // State to store text blocks with individual formatting
+  const [textBlocks, setTextBlocks] = useState<TextBlockType[][]>(() => {
+    return examPaper.extractedText.map(text => {
+      return text
+        .split('\n')
+        .filter(line => line.trim() !== '')
+        .map(line => ({
+          text: line,
+          format: {...textFormat}
+        }));
+    });
+  });
+  
+  // State for the selected block index
+  const [selectedBlockIndex, setSelectedBlockIndex] = useState<number | null>(null);
+  
+  const previewRef = useRef<HTMLDivElement>(null);
+  const [logoBase64, setLogoBase64] = useState<string | null>(null);
+
+  // Load logo at component initialization
+  useEffect(() => {
+    const loadLogo = async () => {
+      try {
+        // Create a new image element
+        const img = new Image();
+        img.crossOrigin = "Anonymous";
+        img.src = "/logos/school-logo.svg";
+        
+        // Wait for image to load
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+        });
+        
+        // Draw image to canvas and get base64 data
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0);
+          const base64 = canvas.toDataURL('image/png');
+          setLogoBase64(base64);
+        }
+      } catch (error) {
+        console.error('Error preloading logo:', error);
+      }
+    };
+    
+    loadLogo();
+  }, []);
+
+  // Initialize rich text content when entering edit mode
+  useEffect(() => {
+    if (isEditMode) {
+      const content: Record<number, string> = {};
+      
+      textBlocks.forEach((block, blockIndex) => {
+        // Convert the block to HTML for the rich text editor
+        // First line (question) in bold, subsequent lines (sub-points) with indentation
+        const html = block.map((line, lineIndex) => {
+          const text = lineIndex === 0 
+            ? `<strong>${blockIndex + 1}. ${line.text}</strong>` 
+            : `&nbsp;&nbsp;&nbsp;&nbsp;${line.text}`;
+          
+          const style = `
+            font-size: ${line.format.fontSize}pt;
+            ${line.format.isBold ? 'font-weight: bold;' : ''}
+            ${line.format.isItalic ? 'font-style: italic;' : ''}
+            text-align: ${line.format.alignment};
+          `;
+          
+          return `<p style="${style}">${text}</p>`;
+        }).join('');
+        
+        content[blockIndex] = html;
+      });
+      
+      setRichTextContent(content);
+    }
+  }, [isEditMode, textBlocks]);
+
+  // Handle rich text editor content change
+  const handleRichTextChange = (blockIndex: number, content: string) => {
+    setRichTextContent(prev => ({
+      ...prev,
+      [blockIndex]: content
+    }));
+  };
+
+  // Process HTML content back to text blocks with formatting
+  const processRichTextContent = () => {
+    const parser = new DOMParser();
+    const newTextBlocks = [...textBlocks];
+    
+    Object.entries(richTextContent).forEach(([blockIdxStr, html]) => {
+      const blockIndex = parseInt(blockIdxStr);
+      
+      // Parse the HTML content
+      const doc = parser.parseFromString(html, 'text/html');
+      const paragraphs = doc.querySelectorAll('p');
+      
+      // Convert paragraphs to text blocks
+      const blockLines: TextBlockType[] = [];
+      
+      paragraphs.forEach((p, lineIndex) => {
+        let text = p.textContent || '';
+        
+        // Remove question number from the first line if present
+        if (lineIndex === 0 && text.startsWith(`${blockIndex + 1}. `)) {
+          text = text.substring(`${blockIndex + 1}. `.length);
+        }
+        
+        // Remove leading spaces from sub-points
+        text = text.replace(/^\s+/, '');
+        
+        // Extract formatting from style attribute
+        const style = p.getAttribute('style') || '';
+        const isBold = style.includes('font-weight: bold') || p.querySelector('strong') !== null;
+        const isItalic = style.includes('font-style: italic') || p.querySelector('em') !== null;
+        
+        // Extract font size
+        let fontSize = textFormat.fontSize;
+        const fontSizeMatch = style.match(/font-size:\s*(\d+)pt/);
+        if (fontSizeMatch && fontSizeMatch[1]) {
+          fontSize = parseInt(fontSizeMatch[1]);
+        }
+        
+        // Extract alignment
+        let alignment: 'left' | 'center' | 'right' = 'left';
+        if (style.includes('text-align: center')) alignment = 'center';
+        if (style.includes('text-align: right')) alignment = 'right';
+        
+        blockLines.push({
+          text,
+          format: { isBold, isItalic, fontSize, alignment }
+        });
+      });
+      
+      if (blockLines.length > 0) {
+        newTextBlocks[blockIndex] = blockLines;
+      }
+    });
+    
+    return newTextBlocks;
+  };
+
+  const saveChanges = () => {
+    if (isEditMode) {
+      // Process the rich text content back to textBlocks
+      const newTextBlocks = processRichTextContent();
+      setTextBlocks(newTextBlocks);
+      
+      // Update editedPaper.extractedText
+      const newExtractedText = newTextBlocks.map(block => 
+        block.map(line => line.text).join('\n')
+      );
+      
+      setEditedPaper({
+        ...editedPaper,
+        extractedText: newExtractedText
+      });
+    }
+    
+    setIsEditMode(false);
+    setSelectedBlockIndex(null);
+  };
+
+  const cancelChanges = () => {
+    // Reset to original values
+    setEditedPaper({...examPaper});
+    setTextBlocks(examPaper.extractedText.map(text => {
+      return text
+        .split('\n')
+        .filter(line => line.trim() !== '')
+        .map(line => ({
+          text: line,
+          format: {...textFormat}
+        }));
+    }));
+    setRichTextContent({});
+    setIsEditMode(false);
+    setSelectedBlockIndex(null);
+  };
+
+  const selectBlock = (blockIndex: number) => {
+    setSelectedBlockIndex(blockIndex);
+  };
+
+  const generatePDF = async () => {
+    try {
+      setIsGenerating(true);
+      
+      // Create a new jsPDF instance
+      const doc = new jsPDF();
+      
+      // Set margins and dimensions
+      const margin = 20;
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      
+      // Clean white background
+      doc.setFillColor(255, 255, 255);
+      doc.rect(0, 0, pageWidth, pageHeight, 'F');
+      
+      // Add school logo if available
+      if (logoBase64) {
+        // We'll add the logo to the PDF (left side) - smaller size
+        const logoSize = 20;
+        const logoY = margin;
+        doc.addImage(logoBase64, 'PNG', margin, logoY, logoSize, logoSize);
+      }
+      
+      // Add school name with better styling - bigger font
+      doc.setFontSize(22);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(0, 0, 0);
+      const schoolNameText = editedPaper.schoolName;
+      const schoolNameWidth = doc.getStringUnitWidth(schoolNameText) * 22 / doc.internal.scaleFactor;
+      doc.text(schoolNameText, (pageWidth - schoolNameWidth) / 2, margin + 8);
+      
+      // Add a thin header line 
+      doc.setDrawColor(200, 200, 200);
+      doc.setLineWidth(0.3);
+      doc.line(margin, margin + 15, pageWidth - margin, margin + 15);
+      
+      // Add class, subject, exam term in one line (left side)
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(0, 0, 0);
+      
+      const leftHeaderText = `${editedPaper.className} - ${editedPaper.subject}${editedPaper.examTerm ? ' | ' + currentLabels.examTerm + ': ' + editedPaper.examTerm : ''}`;
+      doc.text(leftHeaderText, margin, margin + 25);
+      
+      // Add exam time and total marks on right side
+      doc.setFontSize(11);
+      const rightHeaderText = `${currentLabels.examTime}: ${editedPaper.examTime} | ${currentLabels.totalMarks}: ${editedPaper.totalMarks}`;
+      const rightHeaderWidth = doc.getStringUnitWidth(rightHeaderText) * 11 / doc.internal.scaleFactor;
+      doc.text(rightHeaderText, pageWidth - margin - rightHeaderWidth, margin + 25);
+      
+      // Add a thin second line
+      doc.setDrawColor(200, 200, 200);
+      doc.setLineWidth(0.3);
+      doc.line(margin, margin + 30, pageWidth - margin, margin + 30);
+      
+      // Start Y position for content
+      let y = margin + 40;
+      
+      // Add student fields if enabled
+      if (editedPaper.hasStudentFields) {
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(0, 0, 0);
+        
+        // Student name field
+        doc.text(`${currentLabels.studentName}: ____________________________`, margin, y);
+        
+        // Roll number field
+        doc.text(`${currentLabels.studentRoll}: ______________`, pageWidth - margin - 80, y);
+        
+        y += 15;
+      }
+      
+      // Add instructions with better styling
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(0, 0, 0);
+      doc.text(currentLabels.instructions, margin, y);
+      
+      // Add questions with individual formatting for each line
+      y += 15;
+      
+      textBlocks.forEach((block, blockIndex) => {
+        block.forEach((line, lineIndex) => {
+          // Check if we need a new page
+          if (y > pageHeight - margin) {
+            doc.addPage();
+            
+            // Add clean white background to new page
+            doc.setFillColor(255, 255, 255);
+            doc.rect(0, 0, pageWidth, pageHeight, 'F');
+            
+            y = margin + 20;
+          }
+          
+          // Apply individual formatting
+          doc.setFontSize(line.format.fontSize);
+          doc.setFont('helvetica', line.format.isBold ? 'bold' : line.format.isItalic ? 'italic' : 'normal');
+          doc.setTextColor(0, 0, 0);
+          
+          // Add question number for the first line of each block
+          let displayText = lineIndex === 0 ? `${blockIndex + 1}. ${line.text}` : line.text;
+          
+          // For sub-points with indentation
+          if (lineIndex !== 0 && line.format.alignment === 'left') {
+            displayText = `   ${displayText}`;
+          }
+          
+          // Apply text alignment
+          let xPosition = margin;
+          if (line.format.alignment === 'center') {
+            xPosition = pageWidth / 2;
+          } else if (line.format.alignment === 'right') {
+            xPosition = pageWidth - margin;
+          }
+          
+          // Handle long lines by splitting into multiple lines
+          const textWidth = doc.getStringUnitWidth(displayText) * line.format.fontSize / doc.internal.scaleFactor;
+          if (textWidth > pageWidth - 2 * margin) {
+            const splitLines = doc.splitTextToSize(displayText, pageWidth - 2 * margin);
+            doc.text(splitLines, xPosition, y, { 
+              align: line.format.alignment 
+            });
+            y += (lineIndex === 0 ? 7 : 6) * splitLines.length;
+          } else {
+            doc.text(displayText, xPosition, y, { 
+              align: line.format.alignment
+            });
+            y += lineIndex === 0 ? 7 : 6;
+          }
+        });
+        
+        // Add space between questions
+        y += 5;
+      });
+      
+      // Add footer with page numbers
+      const pageCount = doc.internal.getNumberOfPages();
+      for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(100, 100, 100);
+        
+        // Add page number
+        const pageText = `${currentLabels.pageText} ${i} ${currentLabels.of} ${pageCount}`;
+        doc.text(pageText, pageWidth / 2, pageHeight - 10, { align: 'center' });
+      }
+      
+      // Save the PDF with improved filename
+      const fileName = `${editedPaper.schoolName.replace(/\s/g, '_')}_${editedPaper.className}_${editedPaper.subject}_ExamPaper.pdf`;
+      doc.save(fileName);
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      alert(currentLabels.errorMessage);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handlePrint = () => {
+    window.print();
+  };
+
+  // Rich text editor modules and formats
+  const modules = {
+    toolbar: [
+      [{ 'header': [1, 2, 3, 4, 5, 6, false] }],
+      ['bold', 'italic', 'underline', 'strike'],
+      [{ 'size': ['9px', '10px', '11px', '12px', '14px', '16px', '18px'] }],
+      [{ 'align': [] }],
+      [{ 'list': 'ordered'}, { 'list': 'bullet' }],
+      [{ 'indent': '-1'}, { 'indent': '+1' }],
+      ['clean']
+    ]
+  };
+
+  const formats = [
+    'header',
+    'bold', 'italic', 'underline', 'strike',
+    'size', 'align',
+    'list', 'bullet', 'indent'
+  ];
+
+  const labels = {
+    hindi: {
+      title: 'परीक्षा पेपर प्रीव्यू',
+      examTime: 'समय',
+      totalMarks: 'पूर्णांक',
+      examTerm: 'परीक्षा अवधि',
+      studentName: 'छात्र का नाम',
+      studentRoll: 'अनुक्रमांक',
+      instructions: 'निर्देश: सभी प्रश्न अनिवार्य हैं। उत्तर स्पष्ट और संक्षिप्त लिखें।',
+      newPaperButton: 'नया परीक्षा पेपर बनाएँ',
+      backButton: 'वापस जाएँ',
+      pdfButtonText: 'PDF डाउनलोड करें',
+      printButtonText: 'प्रिंट करें',
+      editPaperButton: 'पेपर एडिट करें',
+      saveEditButton: 'परिवर्तन सहेजें',
+      cancelEditButton: 'रद्द करें',
+      fontSizeLabel: 'फ़ॉन्ट आकार:',
+      boldText: 'बोल्ड',
+      italicText: 'इटैलिक',
+      alignmentLabel: 'संरेखण:',
+      leftAlign: 'बाएँ',
+      centerAlign: 'केंद्र',
+      rightAlign: 'दाएँ',
+      generatingPdf: 'PDF बन रहा है...',
+      printingPaper: 'प्रिंट हो रहा है...',
+      pageText: 'पृष्ठ',
+      of: '/',
+      errorMessage: 'PDF बनाने में समस्या आई है। कृपया पुनः प्रयास करें।',
+      selectTextPrompt: 'कृपया फॉर्मेटिंग के लिए टेक्स्ट चुनें',
+      question: 'प्रश्न'
+    },
+    english: {
+      title: 'Exam Paper Preview',
+      examTime: 'Duration',
+      totalMarks: 'Total Marks',
+      examTerm: 'Exam Term',
+      studentName: 'Student Name',
+      studentRoll: 'Roll No.',
+      instructions: 'Instructions: All questions are compulsory. Write answers clearly and concisely.',
+      newPaperButton: 'Create New Exam Paper',
+      backButton: 'Go Back',
+      pdfButtonText: 'Download PDF',
+      printButtonText: 'Print Paper',
+      editPaperButton: 'Edit Paper',
+      saveEditButton: 'Save Changes',
+      cancelEditButton: 'Cancel',
+      fontSizeLabel: 'Font Size:',
+      boldText: 'Bold',
+      italicText: 'Italic',
+      alignmentLabel: 'Alignment:',
+      leftAlign: 'Left',
+      centerAlign: 'Center',
+      rightAlign: 'Right',
+      generatingPdf: 'Generating PDF...',
+      printingPaper: 'Printing...',
+      pageText: 'Page',
+      of: 'of',
+      errorMessage: 'Error generating file. Please try again.',
+      selectTextPrompt: 'Please select text to format',
+      question: 'Question'
+    }
+  };
+
+  const currentLabels = labels[examPaper.language as keyof typeof labels];
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-xl font-semibold mb-6 text-center">{currentLabels.title}</h2>
+      
+      <div ref={previewRef} id="previewRef" className="bg-white border rounded-lg p-8 max-w-4xl mx-auto shadow">
+        <div className="flex items-center mb-4 pb-3 border-b border-gray-200">
+          <div className="w-1/12">
+            <Image
+              id="school-logo"
+              src="/logos/school-logo.svg"
+              alt="School Logo"
+              width={45}
+              height={45}
+              className="object-contain"
+              priority
+            />
+          </div>
+          <div className="w-11/12 text-center">
+            <h1 className="text-2xl font-bold">{editedPaper.schoolName}</h1>
+          </div>
+        </div>
+        
+        <div className="flex justify-between mb-6 pb-2 border-b border-gray-100">
+          <div className="flex gap-4 items-center">
+            <p className="font-medium">{editedPaper.className} - {editedPaper.subject}</p>
+            {editedPaper.examTerm && (
+              <p className="font-medium">{currentLabels.examTerm}: {editedPaper.examTerm}</p>
+            )}
+          </div>
+          <div className="flex gap-4 items-center">
+            <p className="font-medium">{currentLabels.examTime}: {editedPaper.examTime}</p>
+            <p className="font-medium">{currentLabels.totalMarks}: {editedPaper.totalMarks}</p>
+          </div>
+        </div>
+        
+        {editedPaper.hasStudentFields && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6 pb-4 border-b border-gray-100">
+            <div>
+              <p className="text-gray-700">{currentLabels.studentName}: _____________________</p>
+            </div>
+            <div>
+              <p className="text-gray-700">{currentLabels.studentRoll}: _____________________</p>
+            </div>
+          </div>
+        )}
+        
+        <div className="mb-6 py-2 px-4 bg-gray-50 rounded-md">
+          <p className="text-sm italic text-gray-600">{currentLabels.instructions}</p>
+        </div>
+        
+        <div className="space-y-4">
+          {isEditMode ? (
+            // Rich text editor interface for each question
+            textBlocks.map((block, blockIndex) => (
+              <div key={blockIndex} className="mb-6 border-b border-gray-100 pb-4">
+                <div className="pb-2 mb-2">
+                  <span className="font-medium">{currentLabels.question} {blockIndex + 1}</span>
+                </div>
+                <div className={selectedBlockIndex === blockIndex ? 'ring-2 ring-primary rounded-md' : ''}>
+                  {typeof window !== 'undefined' && (
+                    <ReactQuill
+                      value={richTextContent[blockIndex] || ''}
+                      onChange={(content) => handleRichTextChange(blockIndex, content)}
+                      modules={modules}
+                      formats={formats}
+                      theme="snow"
+                      onClick={() => selectBlock(blockIndex)}
+                    />
+                  )}
+                </div>
+              </div>
+            ))
+          ) : (
+            // Read-only preview interface
+            textBlocks.map((block, blockIndex) => (
+              <div key={blockIndex} className="space-y-2 pb-3 border-b border-gray-100 last:border-0">
+                {block.map((line, lineIndex) => (
+                  <p 
+                    key={`${blockIndex}-${lineIndex}`} 
+                    className={`${lineIndex === 0 ? 'font-medium' : 'pl-6'} text-base`}
+                    style={{
+                      fontWeight: line.format.isBold ? 'bold' : 'normal',
+                      fontStyle: line.format.isItalic ? 'italic' : 'normal',
+                      fontSize: `${line.format.fontSize}pt`,
+                      textAlign: line.format.alignment
+                    }}
+                  >
+                    {lineIndex === 0 ? `${blockIndex + 1}. ${line.text}` : line.text}
+                  </p>
+                ))}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+      
+      <div className="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4">
+        {isEditMode ? (
+          <>
+            <button
+              type="button"
+              onClick={cancelChanges}
+              className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-6 rounded-lg transition duration-300"
+            >
+              {currentLabels.cancelEditButton}
+            </button>
+            
+            <button
+              type="button"
+              onClick={saveChanges}
+              className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-6 rounded-lg transition duration-300"
+            >
+              {currentLabels.saveEditButton}
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={onBack}
+              className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-6 rounded-lg transition duration-300"
+            >
+              {currentLabels.backButton}
+            </button>
+            
+            <button
+              type="button"
+              onClick={() => window.location.href = '/create-paper'}
+              className="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-6 rounded-lg transition duration-300"
+            >
+              {currentLabels.newPaperButton}
+            </button>
+            
+            <button
+              type="button"
+              onClick={() => setIsEditMode(true)}
+              className="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-lg transition duration-300"
+            >
+              {currentLabels.editPaperButton}
+            </button>
+            
+            <button
+              type="button"
+              onClick={generatePDF}
+              disabled={isGenerating}
+              className="bg-primary hover:bg-secondary text-white font-bold py-2 px-6 rounded-lg transition duration-300 disabled:opacity-50"
+            >
+              {isGenerating ? currentLabels.generatingPdf : currentLabels.pdfButtonText}
+            </button>
+            
+            <button
+              type="button"
+              onClick={handlePrint}
+              className="bg-primary hover:bg-secondary text-white font-bold py-2 px-6 rounded-lg transition duration-300"
+            >
+              {currentLabels.printButtonText}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

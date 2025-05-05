@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-rgb: 255, 255, 255;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: rgb(var(--background-rgb));
+}
+
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  
+  .container, .container * {
+    visibility: hidden;
+  }
+  
+  #previewRef, #previewRef * {
+    visibility: visible;
+  }
+  
+  #previewRef {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background-color: white;
+    box-shadow: none;
+    border: none;
+  }
+  
+  /* Hide buttons and interface elements during print */
+  button, .button, input[type="button"], input[type="submit"] {
+    display: none !important;
+  }
+  
+  /* Make input fields look like regular text for printing */
+  #previewRef input[type="text"], #previewRef textarea {
+    border: none !important;
+    background: transparent !important;
+    -webkit-appearance: none !important;
+    -moz-appearance: none !important;
+    appearance: none !important;
+    box-shadow: none !important;
+    outline: none !important;
+    width: auto !important;
+    height: auto !important;
+    resize: none !important;
+  }
+} 
